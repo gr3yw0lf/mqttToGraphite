@@ -21,6 +21,15 @@ import (
 	"collectd.org/api"
 )
 
+const (
+		DEFAULT_DEBUG = true
+		DEFAULT_QOS	= 1
+		DEFAULT_SUBSCRIPTION = "collectd/+/load/#"
+		DEFAULT_MAXAGE = 100
+)
+
+var debug bool
+
 ////////////////
 // Main
 func main() {
@@ -31,8 +40,9 @@ func main() {
 	var graphiteServer string
 
 	flag.StringVar(&mqttServerURL, "host", "tcp://172.17.0.12:1883", "server address")
-	flag.IntVar(&qos, "qos", 1, "qos level")
+	flag.IntVar(&qos, "qos", DEFAULT_QOS, "qos level")
 	flag.BoolVar(&requireCerts, "tls", false, "TLS Certificates required")
+	flag.BoolVar(&debug, "debug", DEFAULT_DEBUG, "Debug messages")
 	flag.StringVar(&graphiteServer, "g", "172.17.0.5", "Graphite Server")
 	typesDbFile := flag.String("t", "/usr/share/collectd/types.db", "The location of the collectd types.db file")
 	flag.Parse()
@@ -97,28 +107,42 @@ func main() {
 	// TODO: Err check this connection
 	log.Printf("Loaded Graphite connection: %#v", graphite)
 
-	// create the context
+
+	// create the metricQueue
+	metricQueue := NewMetricQueue()
+
+	// create the server shared items
 	//
-	context := &GraphiteContext{
+	server := &MqttToGraphite{
 			graphiteServer: graphite,
 			typesDB: typesDB,
 			mqttClient: client,
+			debug: debug,
+			count: 0,
+			queue: metricQueue,
 	}
 
 	// subscribe to the mqtt messages
 
-	subscribeTopic := "collectd/#"
-	//subscribeTopic := "collectd/oak.tree.local/load/#"
+	subscribeTopic := DEFAULT_SUBSCRIPTION
+	//subscribeTopic := "collectd/+/load/#"
 	//subscribeTopic := "collectd/oak.tree.local/memory/#"
 
 	fmt.Printf("Subscribing to %s\n", subscribeTopic)
 	// pass an instance to the context pointer
-	if token := client.Subscribe(subscribeTopic, byte(qos), context.MessageHandler); token.Wait() && token.Error() != nil {
+	if token := client.Subscribe(subscribeTopic, byte(qos), server.MessageHandler); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
+
+	// process values periodically
+	processTimer := time.NewTicker(time.Second * 10).C
 	for {
-		//log.Println("waiting for signal")
-		time.Sleep(30 * time.Second)
+		select {
+		case <-processTimer:
+			server.count = 0
+			server.Send()
+			log.Printf("Count: %d", server.count)
+		}
 	}
 
 	log.Println("end")
@@ -127,20 +151,82 @@ func main() {
 // end of Main
 /////////////////
 
-type GraphiteContext struct {
+
+//////////////////////////////////////////////
+// GraphiteItem Object
+//
+type GraphiteItem struct {
+	topic string
+	metrics []graphite.Metric
+}
+func NewGraphiteItem(topicString string, topicMetrics []graphite.Metric) (*GraphiteItem) {
+	item := &GraphiteItem{
+		topic: topicString,
+		metrics: topicMetrics,
+	}
+	return item
+}
+
+//////////////////////////////////////////////
+// MetricQueue Object
+//
+type MetricQueue struct {
+	topics map[string]*GraphiteItem
+	lastSent int64
+}
+
+func NewMetricQueue() (*MetricQueue) {
+	mq := &MetricQueue{
+		topics: make(map[string]*GraphiteItem),
+		lastSent: 0,
+	}
+	return mq
+}
+
+func (mq *MetricQueue) AddTopic(topicString string, topicMetrics []graphite.Metric) {
+	if _, ok := mq.topics[topicString]; !ok {
+		// debug:
+		if debug {
+				log.Printf("metricQueue.AddTopic creating %s\n", topicString)
+		}
+		// create the graphiteItem
+		newItem := NewGraphiteItem(topicString,topicMetrics)
+		mq.topics[topicString] = newItem
+	} else {
+		// debug:
+		if debug {
+				log.Printf("metricQueue.AddTopic found %s\n", topicString)
+		}
+		mq.topics[topicString].metrics = topicMetrics
+	}
+	// debug:
+	if debug {
+			fmt.Printf(">>>> mq: %+v\n ",mq)
+	}
+}
+
+//////////////////////////////////////////////
+// MqttToGraphite Server Object
+//
+type MqttToGraphite struct {
 	graphiteServer *graphite.Graphite
 	typesDB *api.TypesDB
 	mqttClient mqtt.Client
+	debug bool
+	count int64
+	queue *MetricQueue
 }
 
-// building off of: https://elithrar.github.io/article/custom-handlers-avoiding-globals/
-
-// type MessageHandler func(Client, Message)
-func (g GraphiteContext) MessageHandler(client mqtt.Client, message mqtt.Message) {
+// MessageHandler - required callback for the mqtt subscribe function
+//  from: github.com/eclipse/paho.mqtt.golang : type MessageHandler func(Client, Message)
+//  
+func (g *MqttToGraphite) MessageHandler(client mqtt.Client, message mqtt.Message) {
 	//fmt.Printf("Received message on topic: %+v Message: %s\n", message.Topic(), message.Payload())
+
 	// make sure all host names have .'s replaced
 	topic := strings.Replace(message.Topic(), ".", "_", -1)
 
+	topicPrefix := "test."
 	//>>> topic,value: collectd/oak_tree_local/interface-lo/if_octets  payload: =1476648925.261:638.098817688229:638.098817688229
 	topics := strings.Split(topic, "/")
 	var payloadStrings string
@@ -149,6 +235,7 @@ func (g GraphiteContext) MessageHandler(client mqtt.Client, message mqtt.Message
 		// kill the damn zero byte at the end
 		payloadStrings = string(message.Payload()[:n])
 	} else {
+		fmt.Printf("Payload didnt end with a zero byte\n")
 		payloadStrings = string(message.Payload()[:])
 	}
 	payload := strings.Split(payloadStrings, ":")
@@ -167,7 +254,8 @@ func (g GraphiteContext) MessageHandler(client mqtt.Client, message mqtt.Message
 		for i, source := range dataSet.Sources {
 			//fmt.Printf(">>%d %s\n",i, source.Name)
 			metric :=  graphite.NewMetric(
-				fmt.Sprintf("%s.%s",
+				fmt.Sprintf("%s%s.%s",
+					topicPrefix,
 					strings.Join(topics,"."),
 					source.Name,
 				),
@@ -185,7 +273,8 @@ func (g GraphiteContext) MessageHandler(client mqtt.Client, message mqtt.Message
 
 		// should be a single metric
 		metric :=  graphite.NewMetric(
-			fmt.Sprintf("%s",
+			fmt.Sprintf("%s%s",
+				topicPrefix,
 				strings.Join(topics,"."),
 			),
 			payload[1],
@@ -194,8 +283,42 @@ func (g GraphiteContext) MessageHandler(client mqtt.Client, message mqtt.Message
 		metrics = append(metrics,metric)
 	}
 	
+	g.queue.AddTopic(topic,metrics)
 	//fmt.Printf(">>> %+v\n", metrics)
-	g.graphiteServer.SendMetrics(metrics)
+	//g.graphiteServer.SendMetrics(metrics)
 }
 
+func (g *MqttToGraphite) Send() {
+	// debug:
+	if debug {
+			fmt.Printf("mq.Send: topic count = %d\n", len(g.queue.topics))
+	}
+
+	allMetrics := make([]graphite.Metric,0)
+
+	// collect up all the individual metrics
+	for _, item := range g.queue.topics {
+		// find a list of items that are stale, and exclude them from the sending
+		metricTime := time.Unix(item.metrics[0].Timestamp,0)
+		maxValidity := metricTime.Add(time.Second*DEFAULT_MAXAGE)
+		if maxValidity.Before(time.Now()) {
+			fmt.Printf("Max Validity in the past, now=%+v, maxValidity=%+v\n", time.Now(), maxValidity)
+			fmt.Printf("delete %+v\n", item)
+			delete(g.queue.topics,item.topic)
+		}
+		for _, metric := range item.metrics {
+			if debug {
+				fmt.Printf("metric = %+v\n", metric)
+			}
+			allMetrics = append(allMetrics, metric)
+		}
+	}
+	// debug:
+	if debug {
+			fmt.Printf("len allMetrics = %d, allMetrics = %p\n", len(allMetrics), allMetrics)
+	}
+	g.count = g.count +int64(len(allMetrics))
+	g.graphiteServer.SendMetrics(allMetrics)
+
+}
 
