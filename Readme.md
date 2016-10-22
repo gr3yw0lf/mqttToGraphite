@@ -7,7 +7,8 @@ Specifically made for collectd mqtt plugin
 
 $ ./mqttToGraphite --help
 
-```Usage of ./mqttToGraphite:
+```
+Usage of ./mqttToGraphite:
   -debug
         Debug messages
   -graphite-prefix string
@@ -29,6 +30,7 @@ $ ./mqttToGraphite --help
   -typesdb string
         The location of the collectd types.db file (default "/usr/share/collectd/types.db")
 ```
+
 ### Example run:
 
 $ ./mqttToGraphite -debug -graphite-prefix "test." -mqtt-subscription "collectd/+/load/#" -logfile ./test.log
