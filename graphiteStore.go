@@ -4,7 +4,6 @@ package main
 import (
 	"github.com/marpaia/graphite-golang"
 	//"github.com/gr3yw0lf/graphite-golang"
-	"log"
 	"time"
 	"sync"
 )
@@ -35,7 +34,7 @@ func (store *GraphiteStore) AddTopic(topicString string, topicMetrics []graphite
 	store.lastSeen = time.Unix(topicMetrics[0].Timestamp,0)
 	store.lock.Unlock()
 	if Debug {
-			log.Printf("+ %s\n",topicString)
+			logger.Printf("+ %s\n",topicString)
 	}
 }
 
@@ -54,19 +53,19 @@ func (store *GraphiteStore) GetAll() ([]graphite.Metric, int64) {
 		lastSeen := time.Unix(item[0].Timestamp,0)
 		maxValidity := lastSeen.Add(time.Second*DEFAULT_MAXAGE)
 		if maxValidity.Before(time.Now()) {
-			log.Printf("%s: Max Validity in the past, now=%+v, maxValidity=%+v\n", key, time.Now(), maxValidity)
+			logger.Printf("%s: Max Validity in the past, maxValidity=%+v\n", key, maxValidity)
 			delete(store.topics,key)
 		} else {
 			// compile all metrics within the topic
 			for _, metric := range item {
 				if Debug {
-					log.Printf("metric = %+v\n", metric)
+					logger.Printf("metric = %+v\n", metric)
 				}
 				allMetrics = append(allMetrics, metric)
 			}
 		}
 		if Debug {
-			log.Printf("maxValidity = %v\n", maxValidity)
+			logger.Printf("maxValidity = %v\n", maxValidity)
 		}
 		count++
 	}

@@ -19,46 +19,77 @@ import (
 	"strings"
 	"strconv"
 	"collectd.org/api"
+	"gopkg.in/natefinch/lumberjack.v2"
+	"os/signal"
+	"syscall"
 )
 
 const (
 		DEFAULT_DEBUG = false
-		DEFAULT_QOS	= 1
-		DEFAULT_SUBSCRIPTION = "collectd/+/load/#"
-		DEFAULT_MAXAGE = 40
-		DEFAULT_GRAPHITE_SEND = 10
-		DEFAULT_GRAPHITE_PREFIX = "test."
 		DEFAULT_MQTT_SERVER = "tcp://172.17.0.12:1883"
+		DEFAULT_MQTT_QOS	= 1
+		DEFAULT_MQTT_SUBSCRIPTION = "collectd/#"
+		DEFAULT_GRAPHITE_SEND = 10
+		DEFAULT_GRAPHITE_PREFIX = ""
 		DEFAULT_GRAPHITE_SERVER = "172.17.0.5:2003"
 		DEFAULT_TYPESDB = "/usr/share/collectd/types.db"
+		DEFAULT_MAXAGE = 120	// two minutes
+		PROGRAM = "mqttToGraphite_v1"
+		LOG_FILENAME = "./mqttToGraphite.log"
+		DEFAULT_LOG_COUNTS = false
 )
 
 var Debug bool
+var logger *log.Logger
 
 ////////////////
 // Main
 func main() {
-
-	log.SetFlags(log.Lshortfile | log.LstdFlags )
 	var mqttServerURL string
 	var qos int
 	var requireCerts bool
+	var logCounts bool
 	var graphiteServer string
 	var graphitePrefix string
+	var subscribeTopic string
+
+	// Log to a rotating file
+	e, err := os.OpenFile(LOG_FILENAME, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0640)
+	if err != nil {
+		fmt.Printf("error opening file: %v", err)
+		os.Exit(1)
+	}
+	logger = log.New(e, "" ,log.LstdFlags|log.Lshortfile)
+	logger.SetOutput(&lumberjack.Logger{
+		Filename:   LOG_FILENAME,
+		MaxSize:    1,  // megabytes after which new file is created
+		MaxBackups: 3,  // number of backups
+		MaxAge:     30, //days
+	})
+
+	runChannel := make(chan os.Signal, 1)
+	signal.Notify(runChannel, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-runChannel
+		logger.Println("signal received, exiting")
+		os.Exit(0)
+	}()
 
 	flag.StringVar(&mqttServerURL, "mqtt-server", DEFAULT_MQTT_SERVER, "mqtt server method, address, and port")
-	flag.IntVar(&qos, "qos", DEFAULT_QOS, "mqtt qos level")
+	flag.StringVar(&subscribeTopic, "mqtt-subscription", DEFAULT_MQTT_SUBSCRIPTION, "mqtt server subscription (eg: collectd/+/load/#)")
+	flag.IntVar(&qos, "qos", DEFAULT_MQTT_QOS, "mqtt qos level")
 	flag.BoolVar(&requireCerts, "tls", false, "TLS Certificates required")
 	flag.BoolVar(&Debug, "debug", DEFAULT_DEBUG, "Debug messages")
+	flag.BoolVar(&logCounts, "log-counts", DEFAULT_LOG_COUNTS, "Log the sever counts")
 	flag.StringVar(&graphiteServer, "graphite-server", DEFAULT_GRAPHITE_SERVER, "Graphite Server address, and port")
 	flag.StringVar(&graphitePrefix, "graphite-prefix", DEFAULT_GRAPHITE_PREFIX, "prefix to use when sending to graphite")
 	typesDbFile := flag.String("typesdb", DEFAULT_TYPESDB, "The location of the collectd types.db file")
 	flag.Parse()
 
-	log.Printf("Start: pid:%d", os.Getpid())
-	clientId := fmt.Sprintf("mqtt-client_%d", os.Getpid())
+	logger.Printf("Start:%s pid:%d", PROGRAM, os.Getpid())
+	clientId := fmt.Sprintf("%s_%d", PROGRAM, os.Getpid())
 
-	log.Printf("Connecting to mqtt: %s\n", mqttServerURL)
+	logger.Printf("Connecting to mqtt: %s\n", mqttServerURL)
 
 	mqttOpts := mqtt.NewClientOptions().AddBroker(mqttServerURL).SetClientID(clientId).SetCleanSession(true)
 
@@ -68,17 +99,17 @@ func main() {
 			cacertFile := "./ca.crt"
 			cert, err := tls.LoadX509KeyPair(certFile,keyFile)
 			if err != nil {
-				fmt.Printf("cert or key loading failure\n")
-				log.Fatal(err)
+				logger.Printf("cert or key loading failure\n")
+				logger.Fatal(err)
 			}
 					
 			validationCert, err := ioutil.ReadFile(cacertFile)
 			if err != nil {
-				fmt.Println("Error loading validation certificate. ",err)
+				logger.Println("Error loading validation certificate. ",err)
 			}
 			pool := x509.NewCertPool()
 			if !pool.AppendCertsFromPEM(validationCert) {
-				fmt.Println("Error installing validation certificate.")
+				logger.Println("Error installing validation certificate.")
 			}
 			tlsConfig := &tls.Config{
 				Certificates:   []tls.Certificate{cert},
@@ -98,27 +129,28 @@ func main() {
 
 	file, err := os.Open(*typesDbFile)
 	if err != nil {
-		log.Fatalf("Can't open types.db file %s", typesDbFile)
+		logger.Fatalf("Can't open types.db file %s", typesDbFile)
 	}
 
 	typesDB, err := api.NewTypesDB(file)
 	if err != nil {
-		log.Fatalf("Error in parsing types.db file %s", typesDbFile)
+		logger.Fatalf("Error in parsing types.db file %s", typesDbFile)
 	}
 	file.Close()
 
 	///////////////////////
 	// connect to the graphite server (carbon port)
 
-	log.Printf("Connecting to graphite: %s\n", graphiteServer)
+	logger.Printf("Connecting to graphite: %s\n", graphiteServer)
 	graphiteConnection := strings.Split(graphiteServer,":")
 	graphitePort, _ := strconv.ParseInt(graphiteConnection[1],10,32)
 	graphite, _ := graphite.NewGraphite(graphiteConnection[0],int(graphitePort))
 	// TODO: Err check this connection
-	log.Printf("Loaded Graphite connection: %#v", graphite)
+	logger.Printf("Loaded Graphite connection: %#v", graphite)
 
 
 	// create the graphiteStore
+	//
 	graphiteStore := NewGraphiteStore()
 
 	// create the server shared items
@@ -133,27 +165,28 @@ func main() {
 			graphitePrefix: graphitePrefix,
 	}
 
-	// subscribe to the mqtt messages
-	subscribeTopic := DEFAULT_SUBSCRIPTION
-	log.Printf("Subscribing to %s\n", subscribeTopic)
+	// mqtt subscription (will start to process messages sat in the server)
+	//
+	logger.Printf("Subscribing to %s\n", subscribeTopic)
 	if token := client.Subscribe(subscribeTopic, byte(qos), server.MessageHandler); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
 
 	// process values periodically
+	//
 	processTimer := time.NewTicker(time.Second * DEFAULT_GRAPHITE_SEND).C
 	for {
 		select {
 		case <-processTimer:
 			//server.count = 0
 			server.Send()
-			if Debug {
-				log.Printf("total Count sent: %d", server.count)
+			if logCounts {
+				logger.Printf("total Count sent: %d", server.count)
 			}
 		}
 	}
 
-	log.Println("end")
+	logger.Println("end")
 }
 
 // end of Main
@@ -190,12 +223,12 @@ func (g *MqttToGraphite) MessageHandler(client mqtt.Client, message mqtt.Message
 		// kill it
 		payloadStrings = string(message.Payload()[:n])
 	} else {
-		log.Printf("Payload didnt end with a zero byte\n")
+		logger.Printf("Payload didnt end with a zero byte\n")
 		payloadStrings = string(message.Payload()[:])
 	}
 	payload := strings.Split(payloadStrings, ":")
 	if len(payload) <2 {
-		log.Printf("payload error: length < 2 for %s. Ignoring\n", strings.Join(topics,"."))
+		logger.Printf("payload error: length < 2 for %s. Ignoring\n", strings.Join(topics,"."))
 		return
 	}
 	timestamp, _ := strconv.ParseFloat(payload[0],64)
@@ -222,7 +255,7 @@ func (g *MqttToGraphite) MessageHandler(client mqtt.Client, message mqtt.Message
 	} else {
 		// Not found in typesDB
 		if len(payload) > 2 {
-			log.Printf("Not in TypesDB: %s\n", strings.Join(topics,"."))
+			logger.Printf("Not in TypesDB: %s\n", strings.Join(topics,"."))
 			return
 		}
 
@@ -248,7 +281,7 @@ func (g *MqttToGraphite) Send() {
 	g.count = g.count +int64(len(allMetrics))
 
 	if g.debug {
-		log.Printf("topic count = %d, len allMetrics = %d\n", count, len(allMetrics))
+		logger.Printf("topic count = %d, len allMetrics = %d\n", count, len(allMetrics))
 	}
 
 	// no point trying to send if there are no items
