@@ -19,7 +19,6 @@ import (
 	"strings"
 	"strconv"
 	"collectd.org/api"
-	"sync"
 )
 
 const (
@@ -28,13 +27,13 @@ const (
 		DEFAULT_SUBSCRIPTION = "collectd/+/load/#"
 		DEFAULT_MAXAGE = 40
 		DEFAULT_GRAPHITE_SEND = 10
-		DEFAULT_PREFIX = "test."
+		DEFAULT_GRAPHITE_PREFIX = "test."
 		DEFAULT_MQTT_SERVER = "tcp://172.17.0.12:1883"
 		DEFAULT_GRAPHITE_SERVER = "172.17.0.5:2003"
 		DEFAULT_TYPESDB = "/usr/share/collectd/types.db"
 )
 
-var debug bool
+var Debug bool
 
 ////////////////
 // Main
@@ -45,12 +44,14 @@ func main() {
 	var qos int
 	var requireCerts bool
 	var graphiteServer string
+	var graphitePrefix string
 
 	flag.StringVar(&mqttServerURL, "mqtt-server", DEFAULT_MQTT_SERVER, "mqtt server method, address, and port")
 	flag.IntVar(&qos, "qos", DEFAULT_QOS, "mqtt qos level")
 	flag.BoolVar(&requireCerts, "tls", false, "TLS Certificates required")
-	flag.BoolVar(&debug, "debug", DEFAULT_DEBUG, "Debug messages")
+	flag.BoolVar(&Debug, "debug", DEFAULT_DEBUG, "Debug messages")
 	flag.StringVar(&graphiteServer, "graphite-server", DEFAULT_GRAPHITE_SERVER, "Graphite Server address, and port")
+	flag.StringVar(&graphitePrefix, "graphite-prefix", DEFAULT_GRAPHITE_PREFIX, "prefix to use when sending to graphite")
 	typesDbFile := flag.String("typesdb", DEFAULT_TYPESDB, "The location of the collectd types.db file")
 	flag.Parse()
 
@@ -117,8 +118,8 @@ func main() {
 	log.Printf("Loaded Graphite connection: %#v", graphite)
 
 
-	// create the metricQueue
-	metricQueue := NewMetricQueue()
+	// create the graphiteStore
+	graphiteStore := NewGraphiteStore()
 
 	// create the server shared items
 	//
@@ -126,18 +127,15 @@ func main() {
 			graphiteServer: graphite,
 			typesDB: typesDB,
 			mqttClient: client,
-			debug: debug,
+			debug: Debug,
 			count: 0,
-			queue: metricQueue,
-			graphitePrefix: DEFAULT_PREFIX,
+			graphiteStore: graphiteStore,
+			graphitePrefix: graphitePrefix,
 	}
 
 	// subscribe to the mqtt messages
-
 	subscribeTopic := DEFAULT_SUBSCRIPTION
-
 	log.Printf("Subscribing to %s\n", subscribeTopic)
-	// pass an instance to the context pointer
 	if token := client.Subscribe(subscribeTopic, byte(qos), server.MessageHandler); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
@@ -149,7 +147,7 @@ func main() {
 		case <-processTimer:
 			//server.count = 0
 			server.Send()
-			if debug {
+			if Debug {
 				log.Printf("total Count sent: %d", server.count)
 			}
 		}
@@ -162,71 +160,6 @@ func main() {
 /////////////////
 
 //////////////////////////////////////////////
-// MetricQueue Object
-//
-type MetricQueue struct {
-	topics map[string][]graphite.Metric
-	lastSeen time.Time
-	lock *sync.Mutex
-}
-
-// create a new MetricQueue 
-func NewMetricQueue() (*MetricQueue) {
-	mq := &MetricQueue{
-		topics: make(map[string][]graphite.Metric),
-		lock: &sync.Mutex{},
-	}
-	return mq
-}
-
-// add into the MetricQueue
-func (mq *MetricQueue) AddTopic(topicString string, topicMetrics []graphite.Metric) {
-	mq.lock.Lock()
-	mq.topics[topicString] = topicMetrics
-	mq.lastSeen = time.Unix(topicMetrics[0].Timestamp,0)
-	mq.lock.Unlock()
-	if debug {
-			log.Printf("+ %s\n",topicString)
-	}
-}
-
-// return all the valid metrics from the map of topics and
-//  the count of the amount of topics processed
-func (mq *MetricQueue) GetAll() ([]graphite.Metric, int64) {
-
-	allMetrics := make([]graphite.Metric,0)
-	var count int64
-
-	// collect up all the individual metrics
-	mq.lock.Lock()
-	for key, item := range mq.topics {
-		// check if metric is stale, and exclude them 
-		//  (only check one of the timstamps in the metric, as all metrics should have the same timestamp)
-		lastSeen := time.Unix(item[0].Timestamp,0)
-		maxValidity := lastSeen.Add(time.Second*DEFAULT_MAXAGE)
-		if maxValidity.Before(time.Now()) {
-			log.Printf("%s: Max Validity in the past, now=%+v, maxValidity=%+v\n", key, time.Now(), maxValidity)
-			delete(mq.topics,key)
-		} else {
-			// compile all metrics within the topic
-			for _, metric := range item {
-				if debug {
-					log.Printf("metric = %+v\n", metric)
-				}
-				allMetrics = append(allMetrics, metric)
-			}
-		}
-		if debug {
-			log.Printf("maxValidity = %v\n", maxValidity)
-		}
-		count++
-	}
-	mq.lock.Unlock()
-	return allMetrics, count
-}
-
-
-//////////////////////////////////////////////
 // MqttToGraphite Server Object
 //
 type MqttToGraphite struct {
@@ -235,7 +168,7 @@ type MqttToGraphite struct {
 	mqttClient mqtt.Client
 	debug bool
 	count int64
-	queue *MetricQueue
+	graphiteStore *GraphiteStore
 	graphitePrefix string
 }
 
@@ -305,16 +238,16 @@ func (g *MqttToGraphite) MessageHandler(client mqtt.Client, message mqtt.Message
 		metrics = append(metrics,metric)
 	}
 	
-	g.queue.AddTopic(topic,metrics)
+	g.graphiteStore.AddTopic(topic,metrics)
 }
 
 // Send all metrics of all topics to graphite
 func (g *MqttToGraphite) Send() {
 
-	allMetrics, count := g.queue.GetAll()
+	allMetrics, count := g.graphiteStore.GetAll()
 	g.count = g.count +int64(len(allMetrics))
 
-	if debug {
+	if g.debug {
 		log.Printf("topic count = %d, len allMetrics = %d\n", count, len(allMetrics))
 	}
 
