@@ -35,7 +35,7 @@ const (
 		DEFAULT_TYPESDB = "/usr/share/collectd/types.db"
 		DEFAULT_MAXAGE = 120	// two minutes
 		PROGRAM = "mqttToGraphite_v1"
-		LOG_FILENAME = "./mqttToGraphite.log"
+		DEFAULT_LOGFILE = "./mqttToGraphite.log"
 		DEFAULT_LOG_COUNTS = false
 )
 
@@ -49,24 +49,10 @@ func main() {
 	var qos int
 	var requireCerts bool
 	var logCounts bool
+	var logFile string
 	var graphiteServer string
 	var graphitePrefix string
 	var subscribeTopic string
-
-	// Log to a rotating file
-	e, err := os.OpenFile(LOG_FILENAME, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0640)
-	if err != nil {
-		fmt.Printf("error opening file: %v", err)
-		os.Exit(1)
-	}
-	logger = log.New(e, "" ,log.LstdFlags|log.Lshortfile)
-	logger.SetOutput(&lumberjack.Logger{
-		Filename:   LOG_FILENAME,
-		MaxSize:    1,  // megabytes after which new file is created
-		MaxBackups: 3,  // number of backups
-		MaxAge:     30, //days
-	})
-
 	runChannel := make(chan os.Signal, 1)
 	signal.Notify(runChannel, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -76,6 +62,7 @@ func main() {
 	}()
 
 	flag.StringVar(&mqttServerURL, "mqtt-server", DEFAULT_MQTT_SERVER, "mqtt server method, address, and port")
+	flag.StringVar(&logFile, "logfile", DEFAULT_LOGFILE, "log file to log details to")
 	flag.StringVar(&subscribeTopic, "mqtt-subscription", DEFAULT_MQTT_SUBSCRIPTION, "mqtt server subscription (eg: collectd/+/load/#)")
 	flag.IntVar(&qos, "qos", DEFAULT_MQTT_QOS, "mqtt qos level")
 	flag.BoolVar(&requireCerts, "tls", false, "TLS Certificates required")
@@ -85,6 +72,20 @@ func main() {
 	flag.StringVar(&graphitePrefix, "graphite-prefix", DEFAULT_GRAPHITE_PREFIX, "prefix to use when sending to graphite")
 	typesDbFile := flag.String("typesdb", DEFAULT_TYPESDB, "The location of the collectd types.db file")
 	flag.Parse()
+
+	// Log to a rotating file
+	e, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0640)
+	if err != nil {
+		fmt.Printf("error opening file: %v", err)
+		os.Exit(1)
+	}
+	logger = log.New(e, "" ,log.LstdFlags|log.Lshortfile)
+	logger.SetOutput(&lumberjack.Logger{
+		Filename:   logFile,
+		MaxSize:    1,  // megabytes after which new file is created
+		MaxBackups: 3,  // number of backups
+		MaxAge:     30, //days
+	})
 
 	logger.Printf("Start:%s pid:%d", PROGRAM, os.Getpid())
 	clientId := fmt.Sprintf("%s_%d", PROGRAM, os.Getpid())
@@ -180,6 +181,7 @@ func main() {
 		case <-processTimer:
 			//server.count = 0
 			server.Send()
+			server.StatsToMqtt()
 			if logCounts {
 				logger.Printf("total Count sent: %d", server.count)
 			}
@@ -289,5 +291,26 @@ func (g *MqttToGraphite) Send() {
 		g.graphiteServer.SendMetrics(allMetrics)
 	}
 
+}
+
+// send stats to local mqtt
+func (g *MqttToGraphite) StatsToMqtt() {
+	topicPrefix := "mqttToGraphite"
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "localhost"
+	}
+
+	g.SendStats(topicPrefix, hostname, "count", fmt.Sprintf("%d",g.count))
+	g.SendStats(topicPrefix, hostname, "lastUpdate", fmt.Sprintf("%d",time.Now().Unix()))
+}
+
+func (g *MqttToGraphite) SendStats(prefix string, host string, suffix string, message string) {
+	topic := strings.Join([]string{prefix, host, suffix},"/")
+	qos := 1
+	if token := g.mqttClient.Publish(topic,byte(qos), true, message); token.Wait() && token.Error() != nil {
+		logger.Printf("mqtt publish error to %s:%v\n", topic, token.Error())
+	}
 }
 
