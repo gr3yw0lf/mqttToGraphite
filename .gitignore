@@ -2,3 +2,4 @@ mqttToGraphite
 *~
 *.log
 *.swp
+*.bak
