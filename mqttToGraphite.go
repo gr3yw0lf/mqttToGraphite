@@ -130,7 +130,7 @@ func main() {
 	// ///////////
 	// Load the typesDB
 
-	file, err := os.Open(*typesDbFile)
+	file, err := os.Open(typesDbFile)
 	if err != nil {
 		logger.Fatalf("Can't open types.db file %s", typesDbFile)
 	}
