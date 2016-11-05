@@ -3,3 +3,4 @@ mqttToGraphite
 *.log
 *.swp
 *.bak
+supervisord.mqttToGraphite.conf
