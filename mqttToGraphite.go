@@ -25,12 +25,12 @@ import (
 
 const (
 	DEFAULT_DEBUG             = false
-	DEFAULT_MQTT_SERVER       = "tcp://172.17.0.12:1883"
+	DEFAULT_MQTT_SERVER       = "tcp://127.0.0.1:1883"
 	DEFAULT_MQTT_QOS          = 1
 	DEFAULT_MQTT_SUBSCRIPTION = "collectd/#"
 	DEFAULT_GRAPHITE_SEND     = 10 // 10 seconds
 	DEFAULT_GRAPHITE_PREFIX   = ""
-	DEFAULT_GRAPHITE_SERVER   = "172.17.0.5:2003"
+	DEFAULT_GRAPHITE_SERVER   = "127.0.0.1:2003"
 	DEFAULT_TYPESDB           = "/usr/share/collectd/types.db"
 	DEFAULT_MAXAGE            = 120 // two minutes
 	PROGRAM                   = "mqttToGraphite_v1"
