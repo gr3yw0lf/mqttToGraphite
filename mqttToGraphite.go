@@ -25,12 +25,12 @@ import (
 
 const (
 	DEFAULT_DEBUG             = false
-	DEFAULT_MQTT_SERVER       = "tcp://172.17.0.12:1883"
+	DEFAULT_MQTT_SERVER       = "tcp://127.0.0.1:1883"
 	DEFAULT_MQTT_QOS          = 1
 	DEFAULT_MQTT_SUBSCRIPTION = "collectd/#"
 	DEFAULT_GRAPHITE_SEND     = 10 // 10 seconds
 	DEFAULT_GRAPHITE_PREFIX   = ""
-	DEFAULT_GRAPHITE_SERVER   = "172.17.0.5:2003"
+	DEFAULT_GRAPHITE_SERVER   = "127.0.0.1:2003"
 	DEFAULT_TYPESDB           = "/usr/share/collectd/types.db"
 	DEFAULT_MAXAGE            = 120 // two minutes
 	PROGRAM                   = "mqttToGraphite_v1"
@@ -226,7 +226,9 @@ func (g *MqttToGraphite) MessageHandler(client mqtt.Client, message mqtt.Message
 		// kill it
 		payloadStrings = string(message.Payload()[:n])
 	} else {
-		logger.Printf("Payload didnt end with a zero byte\n")
+		if g.debug {
+			logger.Printf("Payload didnt end with a zero byte\n")
+		}
 		payloadStrings = string(message.Payload()[:])
 	}
 	payload := strings.Split(payloadStrings, ":")
