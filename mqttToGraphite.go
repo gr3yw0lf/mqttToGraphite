@@ -226,7 +226,9 @@ func (g *MqttToGraphite) MessageHandler(client mqtt.Client, message mqtt.Message
 		// kill it
 		payloadStrings = string(message.Payload()[:n])
 	} else {
-		logger.Printf("Payload didnt end with a zero byte\n")
+		if g.debug {
+			logger.Printf("Payload didnt end with a zero byte\n")
+		}
 		payloadStrings = string(message.Payload()[:])
 	}
 	payload := strings.Split(payloadStrings, ":")
