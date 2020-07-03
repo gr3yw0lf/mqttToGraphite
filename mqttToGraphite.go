@@ -28,7 +28,7 @@ const (
 	DEFAULT_MQTT_SERVER       = "tcp://127.0.0.1:1883"
 	DEFAULT_MQTT_QOS          = 1
 	DEFAULT_MQTT_SUBSCRIPTION = "collectd/#"
-	DEFAULT_GRAPHITE_SEND     = 10 // 10 seconds
+	DEFAULT_GRAPHITE_SEND     = 30
 	DEFAULT_GRAPHITE_PREFIX   = ""
 	DEFAULT_GRAPHITE_SERVER   = "127.0.0.1:2003"
 	DEFAULT_TYPESDB           = "/usr/share/collectd/types.db"
@@ -89,6 +89,9 @@ func main() {
 		MaxBackups: 3,  // number of backups
 		MaxAge:     30, //days
 	})
+	if Debug {
+		logger.SetOutput(os.Stderr)
+	}
 
 	logger.Printf("Start:%s pid:%d", PROGRAM, os.Getpid())
 	clientId := fmt.Sprintf("%s_%d", PROGRAM, os.Getpid())
@@ -216,9 +219,6 @@ func (g *MqttToGraphite) MessageHandler(client mqtt.Client, message mqtt.Message
 	// make sure all host names have .'s replaced
 	topic := strings.Replace(message.Topic(), ".", "_", -1)
 
-	//>>> topic,value: collectd/oak_tree_local/interface-lo/if_octets  payload: =1476648925.261:638.098817688229:638.098817688229
-	topics := strings.Split(topic, "/")
-
 	var payloadStrings string
 	// cope with payload being zero byte terminated (the way collectd adds into mqtt)
 	n := bytes.IndexByte(message.Payload(), 0)
@@ -230,32 +230,55 @@ func (g *MqttToGraphite) MessageHandler(client mqtt.Client, message mqtt.Message
 			logger.Printf("Payload didnt end with a zero byte\n")
 		}
 		payloadStrings = string(message.Payload()[:])
+		if g.debug {
+			logger.Printf("Payload string = %s\n", payloadStrings)
+		}
 	}
+
+	//>>> topic,value: collectd/oak_tree_local/interface-lo/if_octets  payload: =1476648925.261:638.098817688229:638.098817688229
+	topics := strings.Split(topic, "/")
+
 	payload := strings.Split(payloadStrings, ":")
 	if len(payload) < 2 {
-		logger.Printf("payload error: length < 2 for %s. Ignoring\n", strings.Join(topics, "."))
+		logger.Printf("payload error: length < 2 for %s %s Ignoring\n", strings.Join(topics, "."), payloadStrings)
 		return
 	}
-	timestamp, _ := strconv.ParseFloat(payload[0], 64)
+
+	// payload[0] = timestamp with msecs
+	timeStampFloat, err := strconv.ParseFloat(payload[0], 64)
+	if err != nil {
+		if g.debug {
+			logger.Printf("ERROR: payload contained an unparsable unixtime: %s: %v\n", message.Topic(), err)
+		}
+		return
+	}
+	// TODO: deal with the nsecs
+	timestamp := int64(timeStampFloat)
+
 	metrics := make([]graphite.Metric, 0)
 
 	var dataSet *api.DataSet
 	dataSet, found := g.typesDB.DataSet(topics[len(topics)-1])
 	//&{Name:if_packets Sources:[{Name:rx Type:api.Derive Min:0 Max:NaN} {Name:tx Type:api.Derive Min:0 Max:NaN}]}
 	if found {
-		//fmt.Printf("%+v\n", dataSet)
+		//fmt.Printf("264: %+v\n", payload)
 		for i, source := range dataSet.Sources {
-			//fmt.Printf(">>%d %s\n",i, source.Name)
-			metric := graphite.NewMetric(
-				fmt.Sprintf("%s%s.%s",
-					g.graphitePrefix,
-					strings.Join(topics, "."),
-					source.Name,
-				),
-				payload[i+1],
-				int64(timestamp),
-			)
-			metrics = append(metrics, metric)
+			// make sure that the expected number of items in the topics dataSet support
+			//  the payload that has been found
+			//  ie. topics was changed from 4-items to 6-items
+			//  but an old value only has 4 items... thus, payload[i+1] will be NPE
+			if i+1 < len(payload) {
+				metric := graphite.NewMetric(
+					fmt.Sprintf("%s%s.%s",
+						g.graphitePrefix,
+						strings.Join(topics, "."),
+						source.Name,
+					),
+					payload[i+1],
+					timestamp,
+				)
+				metrics = append(metrics, metric)
+			}
 		}
 	} else {
 		// Not found in typesDB
@@ -271,7 +294,7 @@ func (g *MqttToGraphite) MessageHandler(client mqtt.Client, message mqtt.Message
 				strings.Join(topics, "."),
 			),
 			payload[1],
-			int64(timestamp),
+			timestamp,
 		)
 		metrics = append(metrics, metric)
 	}
